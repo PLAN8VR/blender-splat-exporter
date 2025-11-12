@@ -3,4 +3,4 @@ Blender addon that exports synthetic Gaussian Splat .ply using Playcanvas' Splat
 
 Dependancy - https://github.com/playcanvas/splat-transform
 
-Install Blender addon the usual way.
+Install Blender addon (blender_splat_export.py) the usual way.
