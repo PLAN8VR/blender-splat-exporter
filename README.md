@@ -7,6 +7,10 @@ Install Blender addon (blender_splat_export.py) the usual way.
 
 Select mesh to export, file\export\Gaussian Splat (ply)
 
-https://youtu.be/hsBYu37rt2k
 
+
+
+
+
+https://github.com/user-attachments/assets/56a91b27-6227-4ba0-b886-c2a449cde0c7
 
