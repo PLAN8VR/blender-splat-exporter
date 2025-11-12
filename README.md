@@ -5,4 +5,4 @@ Dependancy - https://github.com/playcanvas/splat-transform
 
 Install Blender addon (blender_splat_export.py) the usual way.
 
-Select mesh to export, file-export-Gaussian Splat (ply)
+Select mesh to export, file\export\Gaussian Splat (ply)
