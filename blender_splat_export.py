@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 0, 1),
+    "version": (0, 0, 2),
     "blender": (3, 0, 0),
     "location": "File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform https://github.com/playcanvas/splat-transform",
@@ -14,9 +14,9 @@ import json
 import os
 import subprocess
 import tempfile
-from bpy.props import StringProperty, FloatProperty, IntProperty, BoolProperty
+from bpy.props import StringProperty, FloatProperty, IntProperty, BoolProperty, EnumProperty
 from bpy_extras.io_utils import ExportHelper
-from mathutils import Vector
+from mathutils import Vector, Matrix
 import math
 
 class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
@@ -65,6 +65,46 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         default=True
     )
     
+    axis_forward: EnumProperty(
+        name="Forward",
+        items=(
+            ('X', "X Forward", ""),
+            ('Y', "Y Forward", ""),
+            ('Z', "Z Forward", ""),
+            ('-X', "-X Forward", ""),
+            ('-Y', "-Y Forward", ""),
+            ('-Z', "-Z Forward", ""),
+        ),
+        default='-Z',
+    )
+    
+    axis_up: EnumProperty(
+        name="Up",
+        items=(
+            ('X', "X Up", ""),
+            ('Y', "Y Up", ""),
+            ('Z', "Z Up", ""),
+            ('-X', "-X Up", ""),
+            ('-Y', "-Y Up", ""),
+            ('-Z', "-Z Up", ""),
+        ),
+        default='Y',
+    )
+    
+    def get_axis_conversion_matrix(self):
+        """Create a conversion matrix based on axis settings"""
+        from bpy_extras.io_utils import axis_conversion
+        
+        # Get conversion matrix from Blender's coordinate system to target system
+        conv_matrix = axis_conversion(
+            from_forward='-Y',  # Blender's default forward
+            from_up='Z',        # Blender's default up
+            to_forward=self.axis_forward,
+            to_up=self.axis_up,
+        ).to_4x4()
+        
+        return conv_matrix
+    
     def execute(self, context):
         # Get selected objects
         selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
@@ -78,11 +118,14 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         generator_path = os.path.join(temp_dir, "mesh-generator.mjs")
         
         try:
+            # Get axis conversion matrix
+            axis_matrix = self.get_axis_conversion_matrix()
+            
             # Sample points from meshes
             all_samples = []
             
             for obj in selected_objects:
-                samples = self.sample_mesh(obj, context)
+                samples = self.sample_mesh(obj, context, axis_matrix)
                 all_samples.extend(samples)
             
             self.report({'INFO'}, f"Sampled {len(all_samples)} points from {len(selected_objects)} object(s)")
@@ -120,15 +163,15 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
             import shutil
             shutil.rmtree(temp_dir, ignore_errors=True)
     
-    def sample_mesh(self, obj, context):
+    def sample_mesh(self, obj, context, axis_matrix):
         """Sample points from mesh surface"""
         # Get evaluated mesh (with modifiers applied)
         depsgraph = context.evaluated_depsgraph_get()
         obj_eval = obj.evaluated_get(depsgraph)
         mesh = obj_eval.to_mesh()
         
-        # Transform to world space
-        matrix_world = obj.matrix_world
+        # Transform to world space, then apply axis conversion
+        matrix_world = axis_matrix @ obj.matrix_world
         
         # Create bmesh for easier manipulation
         bm = bmesh.new()
@@ -163,13 +206,13 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                 v0, v1, v2 = [v.co for v in face.verts[:3]]
                 pos = v0 + (v1 - v0) * r1 + (v2 - v0) * r2
                 
-                # Transform to world space
+                # Transform to world space with axis conversion
                 world_pos = matrix_world @ pos
                 
                 # Get color
                 color = self.get_face_color(face, obj, mesh, has_vertex_colors, material)
                 
-                # Get normal for orientation
+                # Get normal for orientation with axis conversion
                 normal = matrix_world.to_3x3() @ face.normal if self.use_normals else Vector((0, 0, 1))
                 
                 samples.append({
