@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 0, 8),
+    "version": (0, 0, 9),
     "blender": (3, 0, 0),
     "location": "File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -66,7 +66,15 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         description="Size of individual splats",
         default=0.05,
         min=0.001,
-        max=100.0
+        max=1.0
+    )
+
+    splat_opacity: FloatProperty(
+        name="Splat Opacity",
+        description="Opacity of individual splats",
+        default=1.0,
+        min=0.0,
+        max=1.0
     )
 
     use_vertex_colors: BoolProperty(
@@ -106,6 +114,34 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         ),
         default='Y',
     )
+
+    def draw(self, context):
+        """Draw the export options in the file browser"""
+        layout = self.layout
+        
+        layout.prop(self, "splat_transform_path")
+        layout.prop(self, "overwrite_output")
+        
+        layout.separator()
+        layout.label(text="Sampling Options:")
+        layout.prop(self, "sampling_mode")
+        if self.sampling_mode == 'SURFACE':
+            layout.prop(self, "sample_density")
+        
+        layout.separator()
+        layout.label(text="Splat Properties:")
+        layout.prop(self, "splat_scale")
+        layout.prop(self, "splat_opacity")
+        
+        layout.separator()
+        layout.label(text="Color Options:")
+        layout.prop(self, "use_vertex_colors")
+        layout.prop(self, "use_normals")
+        
+        layout.separator()
+        layout.label(text="Axis Conversion:")
+        layout.prop(self, "axis_forward")
+        layout.prop(self, "axis_up")
 
     def get_axis_conversion_matrix(self):
         """Create a conversion matrix based on axis settings"""
@@ -160,8 +196,6 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
             self.report({'INFO'}, f"Running: {' '.join(cmd)}")
 
             # Run splat-transform
-            # On Windows, shell=True is needed if splat_transform_path is just a command name
-            # but we need to pass cmd as a list for proper argument handling
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -218,7 +252,8 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                 'position': world_pos,
                 'color': color,
                 'normal': normal,
-                'scale': self.splat_scale
+                'scale': self.splat_scale,
+                'opacity': self.splat_opacity
             })
 
         obj_eval.to_mesh_clear()
@@ -242,12 +277,10 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         has_vertex_colors = False
         
         if hasattr(mesh, 'color_attributes') and len(mesh.color_attributes) > 0:
-            # Try to get the active color attribute
             color_attribute = mesh.color_attributes.active_color
             if color_attribute:
                 has_vertex_colors = True
         elif hasattr(mesh, 'vertex_colors') and len(mesh.vertex_colors) > 0:
-            # Fallback to legacy vertex colors
             color_attribute = mesh.vertex_colors.active
             has_vertex_colors = True
 
@@ -278,7 +311,8 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                     'position': world_pos,
                     'color': color,
                     'normal': normal,
-                    'scale': self.splat_scale
+                    'scale': self.splat_scale,
+                    'opacity': self.splat_opacity
                 })
 
         bm.free()
@@ -297,7 +331,6 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                     domain = color_attribute.domain
                     
                     if domain == 'CORNER':
-                        # Face corner colors - use loop indices directly from the mesh
                         for loop in face.loops:
                             mesh_loop_index = loop.index
                             if mesh_loop_index < len(color_attribute.data):
@@ -305,7 +338,6 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                                 colors.append(color_data[:3])
                     
                     elif domain == 'POINT':
-                        # Vertex colors - use vertex indices
                         for vert in face.verts:
                             vert_index = vert.index
                             if vert_index < len(color_attribute.data):
@@ -313,14 +345,12 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                                 colors.append(color_data[:3])
                     
                     elif domain == 'FACE':
-                        # Face colors - use face index
                         face_index = face.index
                         if face_index < len(color_attribute.data):
                             color_data = color_attribute.data[face_index].color
                             return list(color_data[:3])
                 
                 else:
-                    # Legacy vertex colors - use mesh loop indices
                     for loop_elem in mesh.loops:
                         for loop in face.loops:
                             if loop.index == loop_elem.index:
@@ -329,13 +359,11 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                                     colors.append(color_data[:3])
                                 break
                 
-                # Average the colors if we got any
                 if colors:
                     avg_color = [sum(c[i] for c in colors) / len(colors) for i in range(3)]
                     return avg_color
                     
-            except (IndexError, AttributeError) as e:
-                # If there's any issue reading color attributes, fall through to material color
+            except (IndexError, AttributeError):
                 pass
 
         if material and material.use_nodes:
@@ -350,44 +378,37 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         """Get color for a specific vertex"""
         if self.use_vertex_colors and has_vertex_colors and color_attribute:
             try:
-                # Check the domain of the color attribute
                 if hasattr(color_attribute, 'domain'):
                     domain = color_attribute.domain
                     
                     if domain == 'POINT':
-                        # Vertex colors - direct access
                         if vert_index < len(color_attribute.data):
                             color_data = color_attribute.data[vert_index].color
                             return list(color_data[:3])
                     
                     elif domain == 'CORNER':
-                        # Face corner colors - average all corners connected to this vertex
                         colors = []
                         for loop in mesh.loops:
                             if loop.vertex_index == vert_index:
                                 if loop.index < len(color_attribute.data):
                                     color_data = color_attribute.data[loop.index].color
                                     colors.append(color_data[:3])
-                        
                         if colors:
                             avg_color = [sum(c[i] for c in colors) / len(colors) for i in range(3)]
                             return avg_color
                     
                     elif domain == 'FACE':
-                        # Face colors - average all faces connected to this vertex
                         colors = []
                         for poly in mesh.polygons:
                             if vert_index in poly.vertices:
                                 if poly.index < len(color_attribute.data):
                                     color_data = color_attribute.data[poly.index].color
                                     colors.append(color_data[:3])
-                        
                         if colors:
                             avg_color = [sum(c[i] for c in colors) / len(colors) for i in range(3)]
                             return avg_color
                     
-            except (IndexError, AttributeError) as e:
-                # If there's any issue reading color attributes, fall through to material color
+            except (IndexError, AttributeError):
                 pass
 
         if material and material.use_nodes:
@@ -417,10 +438,11 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
             pos = sample['position']
             color = sample['color']
             scale = math.log(sample['scale'])
+            opacity = sample['opacity']
             quat = normal_to_quat(sample['normal'])
             sample_str = (
                 f"[{pos.x:.6f}, {pos.y:.6f}, {pos.z:.6f}, "
-                f"{scale:.6f}, {color[0]:.6f}, {color[1]:.6f}, {color[2]:.6f}, "
+                f"{scale:.6f}, {color[0]:.6f}, {color[1]:.6f}, {color[2]:.6f}, {opacity:.6f}, "
                 f"{quat[0]:.6f}, {quat[1]:.6f}, {quat[2]:.6f}, {quat[3]:.6f}]"
             )
             sample_data.append(sample_str)
@@ -457,11 +479,11 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
             row.f_dc_0 = packClr(s[4]);
             row.f_dc_1 = packClr(s[5]);
             row.f_dc_2 = packClr(s[6]);
-            row.opacity = packOpacity(1.0);
-            row.rot_0 = s[7];
-            row.rot_1 = s[8];
-            row.rot_2 = s[9];
-            row.rot_3 = s[10];
+            row.opacity = packOpacity(s[7]);
+            row.rot_0 = s[8];
+            row.rot_1 = s[9];
+            row.rot_2 = s[10];
+            row.rot_3 = s[11];
         }};
     }}
     static create(params) {{
