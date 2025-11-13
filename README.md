@@ -6,9 +6,11 @@ Dependancy - https://github.com/playcanvas/splat-transform
 
 Install Blender addon (blender_splat_export.py) the usual way.
 
+Ensure the mesh has colour attribute assigned and that vertex colours have been baked or created.
+
 Select mesh to export, file\export\Gaussian Splat (ply)
 
-Ensure the mesh has colour attribute assigned and that vertex colours have been baked or created. 
+ 
 
 
 
