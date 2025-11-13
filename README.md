@@ -22,3 +22,7 @@ https://github.com/user-attachments/assets/56a91b27-6227-4ba0-b886-c2a449cde0c7
 Pure generated gaussian splat - Blender - Splat-Transform
 https://youtu.be/UDXoV1NK7TI
 
+
+
+https://github.com/user-attachments/assets/6551adbc-ea51-4198-878f-5a49a4330a1b
+
