@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 0, 3),
+    "version": (0, 0, 5),
     "blender": (3, 0, 0),
     "location": "File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -35,6 +35,12 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         name="splat-transform Command",
         description="Command to run splat-transform (e.g., 'splat-transform' if globally installed, or full path)",
         default="splat-transform",
+    )
+
+    overwrite_output: BoolProperty(
+        name="Overwrite Existing File",
+        description="Overwrite output file if it exists",
+        default=True
     )
 
     sample_density: FloatProperty(
@@ -132,11 +138,17 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
             # Generate the mesh generator file
             self.create_mesh_generator(generator_path, all_samples)
 
-            # Build splat-transform command
-            cmd = [self.splat_transform_path, generator_path, self.filepath]
+            # Build splat-transform command as a list
+            cmd = [self.splat_transform_path]
+            if self.overwrite_output:
+                cmd.append('-w')
+            cmd.extend([generator_path, self.filepath])
+            
             self.report({'INFO'}, f"Running: {' '.join(cmd)}")
 
             # Run splat-transform
+            # On Windows, shell=True is needed if splat_transform_path is just a command name
+            # but we need to pass cmd as a list for proper argument handling
             result = subprocess.run(
                 cmd,
                 capture_output=True,
