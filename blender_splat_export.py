@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 0, 7),
+    "version": (0, 0, 8),
     "blender": (3, 0, 0),
     "location": "File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -66,7 +66,7 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         description="Size of individual splats",
         default=0.05,
         min=0.001,
-        max=1.0
+        max=100.0
     )
 
     use_vertex_colors: BoolProperty(
