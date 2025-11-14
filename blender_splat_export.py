@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 1, 0),
+    "version": (0, 1, 1),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -53,16 +53,22 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
     )
 
     splat_scale: FloatProperty(
-        name="Splat Scale",
-        description="Size of individual splats",
-        default=0.05,
+        name="Global Scale Multiplier",
+        description="Global scale multiplier applied to all splats (multiplied with auto-calculated size based on vertex proximity)",
+        default=1.0,
         min=0.001,
-        max=1.0
+        max=10.0
+    )
+    
+    use_auto_scale: BoolProperty(
+        name="Auto Scale from Vertex Proximity",
+        description="Automatically scale splats based on distance to nearest vertex",
+        default=True
     )
 
     splat_opacity: FloatProperty(
-        name="Splat Opacity",
-        description="Opacity of individual splats",
+        name="Global Opacity Multiplier",
+        description="Global opacity multiplier applied to all splats (multiplied with color attribute alpha)",
         default=1.0,
         min=0.0,
         max=1.0
@@ -143,6 +149,7 @@ class GAUSSIANSPLAT_PT_MainPanel(bpy.types.Panel):
         # Splat properties
         box = layout.box()
         box.label(text="Splat Properties:", icon='PARTICLE_DATA')
+        box.prop(settings, "use_auto_scale")
         box.prop(settings, "splat_scale")
         box.prop(settings, "splat_opacity")
         
@@ -289,16 +296,22 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
     )
 
     splat_scale: FloatProperty(
-        name="Splat Scale",
-        description="Size of individual splats",
-        default=0.05,
+        name="Global Scale Multiplier",
+        description="Global scale multiplier applied to all splats (multiplied with auto-calculated size based on vertex proximity)",
+        default=1.0,
         min=0.001,
-        max=1.0
+        max=10.0
+    )
+    
+    use_auto_scale: BoolProperty(
+        name="Auto Scale from Vertex Proximity",
+        description="Automatically scale splats based on distance to nearest vertex",
+        default=True
     )
 
     splat_opacity: FloatProperty(
-        name="Splat Opacity",
-        description="Opacity of individual splats",
+        name="Global Opacity Multiplier",
+        description="Global opacity multiplier applied to all splats (multiplied with color attribute alpha)",
         default=1.0,
         min=0.0,
         max=1.0
@@ -357,6 +370,7 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         
         layout.separator()
         layout.label(text="Splat Properties:")
+        layout.prop(self, "use_auto_scale")
         layout.prop(self, "splat_scale")
         layout.prop(self, "splat_opacity")
         
@@ -457,19 +471,44 @@ def sample_vertices(obj, context, axis_matrix, settings):
         color_attribute = mesh.vertex_colors.active
         has_vertex_colors = True
 
+    # Build KD-tree for nearest neighbor searches if auto-scale is enabled
+    kd = None
+    if settings.use_auto_scale:
+        from mathutils import kdtree
+        kd = kdtree.KDTree(len(mesh.vertices))
+        for i, v in enumerate(mesh.vertices):
+            kd.insert(v.co, i)
+        kd.balance()
+
     samples = []
 
     for vert in mesh.vertices:
         world_pos = matrix_world @ vert.co
-        color = get_vertex_color(vert.index, mesh, has_vertex_colors, color_attribute, material, settings)
+        color, alpha = get_vertex_color(vert.index, mesh, has_vertex_colors, color_attribute, material, settings)
         normal = matrix_world.to_3x3() @ vert.normal if settings.use_normals else Vector((0, 0, 1))
+        
+        # Calculate scale based on nearest neighbor distance
+        if settings.use_auto_scale and kd:
+            # Find the 2 nearest vertices (first will be the vertex itself)
+            nearest = kd.find_n(vert.co, 2)
+            if len(nearest) > 1:
+                nearest_dist = nearest[1][2]  # Distance to second nearest (first is self at distance 0)
+                auto_scale = nearest_dist
+            else:
+                auto_scale = settings.splat_scale
+            final_scale = auto_scale * settings.splat_scale
+        else:
+            final_scale = settings.splat_scale
+        
+        # Multiply alpha with global opacity
+        final_opacity = alpha * settings.splat_opacity
 
         samples.append({
             'position': world_pos,
             'color': color,
             'normal': normal,
-            'scale': settings.splat_scale,
-            'opacity': settings.splat_opacity
+            'scale': final_scale,
+            'opacity': final_opacity
         })
 
     obj_eval.to_mesh_clear()
@@ -500,6 +539,15 @@ def sample_mesh(obj, context, axis_matrix, settings):
         color_attribute = mesh.vertex_colors.active
         has_vertex_colors = True
 
+    # Build KD-tree for nearest neighbor searches if auto-scale is enabled
+    kd = None
+    if settings.use_auto_scale:
+        from mathutils import kdtree
+        kd = kdtree.KDTree(len(mesh.vertices))
+        for i, v in enumerate(mesh.vertices):
+            kd.insert(v.co, i)
+        kd.balance()
+
     samples = []
 
     total_area = sum(face.calc_area() for face in bm.faces)
@@ -520,15 +568,29 @@ def sample_mesh(obj, context, axis_matrix, settings):
             pos = v0 + (v1 - v0) * r1 + (v2 - v0) * r2
             world_pos = matrix_world @ pos
 
-            color = get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material, settings)
+            color, alpha = get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material, settings)
             normal = matrix_world.to_3x3() @ face.normal if settings.use_normals else Vector((0, 0, 1))
+            
+            # Calculate scale based on nearest vertex distance
+            if settings.use_auto_scale and kd:
+                nearest = kd.find(pos)
+                if nearest:
+                    auto_scale = nearest[2]  # Distance to nearest vertex
+                else:
+                    auto_scale = settings.splat_scale
+                final_scale = auto_scale * settings.splat_scale
+            else:
+                final_scale = settings.splat_scale
+            
+            # Multiply alpha with global opacity
+            final_opacity = alpha * settings.splat_opacity
 
             samples.append({
                 'position': world_pos,
                 'color': color,
                 'normal': normal,
-                'scale': settings.splat_scale,
-                'opacity': settings.splat_opacity
+                'scale': final_scale,
+                'opacity': final_opacity
             })
 
     bm.free()
@@ -538,10 +600,11 @@ def sample_mesh(obj, context, axis_matrix, settings):
 
 
 def get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material, settings):
-    """Get color for a face"""
+    """Get color and alpha for a face"""
     if settings.use_vertex_colors and has_vertex_colors and color_attribute:
         try:
             colors = []
+            alphas = []
             
             if hasattr(color_attribute, 'domain'):
                 domain = color_attribute.domain
@@ -552,6 +615,8 @@ def get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material
                         if mesh_loop_index < len(color_attribute.data):
                             color_data = color_attribute.data[mesh_loop_index].color
                             colors.append(color_data[:3])
+                            # Get alpha (4th component)
+                            alphas.append(color_data[3] if len(color_data) > 3 else 1.0)
                 
                 elif domain == 'POINT':
                     for vert in face.verts:
@@ -559,12 +624,14 @@ def get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material
                         if vert_index < len(color_attribute.data):
                             color_data = color_attribute.data[vert_index].color
                             colors.append(color_data[:3])
+                            alphas.append(color_data[3] if len(color_data) > 3 else 1.0)
                 
                 elif domain == 'FACE':
                     face_index = face.index
                     if face_index < len(color_attribute.data):
                         color_data = color_attribute.data[face_index].color
-                        return list(color_data[:3])
+                        alpha = color_data[3] if len(color_data) > 3 else 1.0
+                        return list(color_data[:3]), alpha
             
             else:
                 for loop_elem in mesh.loops:
@@ -573,11 +640,13 @@ def get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material
                             if loop_elem.index < len(color_attribute.data):
                                 color_data = color_attribute.data[loop_elem.index].color
                                 colors.append(color_data[:3])
+                                alphas.append(color_data[3] if len(color_data) > 3 else 1.0)
                             break
             
             if colors:
                 avg_color = [sum(c[i] for c in colors) / len(colors) for i in range(3)]
-                return avg_color
+                avg_alpha = sum(alphas) / len(alphas) if alphas else 1.0
+                return avg_color, avg_alpha
                 
         except (IndexError, AttributeError):
             pass
@@ -585,14 +654,15 @@ def get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material
     if material and material.use_nodes:
         for node in material.node_tree.nodes:
             if node.type == 'BSDF_PRINCIPLED':
-                base_color = node.inputs['Base Color'].default_value[:3]
-                return list(base_color)
+                base_color = node.inputs['Base Color'].default_value
+                alpha = base_color[3] if len(base_color) > 3 else 1.0
+                return list(base_color[:3]), alpha
 
-    return [1.0, 1.0, 1.0]
+    return [1.0, 1.0, 1.0], 1.0
 
 
 def get_vertex_color(vert_index, mesh, has_vertex_colors, color_attribute, material, settings):
-    """Get color for a specific vertex"""
+    """Get color and alpha for a specific vertex"""
     if settings.use_vertex_colors and has_vertex_colors and color_attribute:
         try:
             if hasattr(color_attribute, 'domain'):
@@ -601,29 +671,36 @@ def get_vertex_color(vert_index, mesh, has_vertex_colors, color_attribute, mater
                 if domain == 'POINT':
                     if vert_index < len(color_attribute.data):
                         color_data = color_attribute.data[vert_index].color
-                        return list(color_data[:3])
+                        alpha = color_data[3] if len(color_data) > 3 else 1.0
+                        return list(color_data[:3]), alpha
                 
                 elif domain == 'CORNER':
                     colors = []
+                    alphas = []
                     for loop in mesh.loops:
                         if loop.vertex_index == vert_index:
                             if loop.index < len(color_attribute.data):
                                 color_data = color_attribute.data[loop.index].color
                                 colors.append(color_data[:3])
+                                alphas.append(color_data[3] if len(color_data) > 3 else 1.0)
                     if colors:
                         avg_color = [sum(c[i] for c in colors) / len(colors) for i in range(3)]
-                        return avg_color
+                        avg_alpha = sum(alphas) / len(alphas) if alphas else 1.0
+                        return avg_color, avg_alpha
                 
                 elif domain == 'FACE':
                     colors = []
+                    alphas = []
                     for poly in mesh.polygons:
                         if vert_index in poly.vertices:
                             if poly.index < len(color_attribute.data):
                                 color_data = color_attribute.data[poly.index].color
                                 colors.append(color_data[:3])
+                                alphas.append(color_data[3] if len(color_data) > 3 else 1.0)
                     if colors:
                         avg_color = [sum(c[i] for c in colors) / len(colors) for i in range(3)]
-                        return avg_color
+                        avg_alpha = sum(alphas) / len(alphas) if alphas else 1.0
+                        return avg_color, avg_alpha
                 
         except (IndexError, AttributeError):
             pass
@@ -631,10 +708,11 @@ def get_vertex_color(vert_index, mesh, has_vertex_colors, color_attribute, mater
     if material and material.use_nodes:
         for node in material.node_tree.nodes:
             if node.type == 'BSDF_PRINCIPLED':
-                base_color = node.inputs['Base Color'].default_value[:3]
-                return list(base_color)
+                base_color = node.inputs['Base Color'].default_value
+                alpha = base_color[3] if len(base_color) > 3 else 1.0
+                return list(base_color[:3]), alpha
 
-    return [1.0, 1.0, 1.0]
+    return [1.0, 1.0, 1.0], 1.0
 
 
 def create_mesh_generator(path, samples):
