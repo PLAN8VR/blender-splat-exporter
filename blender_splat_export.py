@@ -90,7 +90,7 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
             ('-Y', "-Y Forward", ""),
             ('-Z', "-Z Forward", ""),
         ),
-        default='-Z',
+        default='Z',
     )
 
     axis_up: EnumProperty(
@@ -103,7 +103,7 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
             ('-Y', "-Y Up", ""),
             ('-Z', "-Z Up", ""),
         ),
-        default='Y',
+        default='-Y',
     )
 
     export_path: StringProperty(
