@@ -14,7 +14,7 @@ Select mesh to export, file\export\Gaussian Splat (.ply), or use the options in 
 
 Currently, there are two options for Points~|~Splats, use the existing vertices
 (most stable and predictable), or sample mesh (less stable and not very optimised just yet). 
-There is a global slider for opacity and size of splat, both of which hopefully will become more programmatic/automatic soon. 
+There is a global slider for opacity and size of splat, and an auto size option based on point proximity. The transparency value is calculated from the colour attribute alpha channel. 
 
  
 
