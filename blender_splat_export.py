@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 1, 1),
+    "version": (0, 1, 2),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -57,7 +57,7 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
         description="Global scale multiplier applied to all splats (multiplied with auto-calculated size based on vertex proximity)",
         default=1.0,
         min=0.001,
-        max=10.0
+        max=100.0
     )
     
     use_auto_scale: BoolProperty(
@@ -300,7 +300,7 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         description="Global scale multiplier applied to all splats (multiplied with auto-calculated size based on vertex proximity)",
         default=1.0,
         min=0.001,
-        max=10.0
+        max=1000.0
     )
     
     use_auto_scale: BoolProperty(
@@ -451,6 +451,7 @@ def get_axis_conversion_matrix(settings):
     return conv_matrix
 
 
+# auto-scale calculation in sample_vertices function
 def sample_vertices(obj, context, axis_matrix, settings):
     """Create splats directly from mesh vertices"""
     depsgraph = context.evaluated_depsgraph_get()
@@ -493,12 +494,16 @@ def sample_vertices(obj, context, axis_matrix, settings):
             nearest = kd.find_n(vert.co, 2)
             if len(nearest) > 1:
                 nearest_dist = nearest[1][2]  # Distance to second nearest (first is self at distance 0)
-                auto_scale = nearest_dist
+                # Ensure minimum scale to prevent log(0) errors
+                auto_scale = max(nearest_dist, 0.0001)
             else:
                 auto_scale = settings.splat_scale
             final_scale = auto_scale * settings.splat_scale
         else:
             final_scale = settings.splat_scale
+        
+        # Ensure final_scale is always positive and non-zero
+        final_scale = max(final_scale, 0.0001)
         
         # Multiply alpha with global opacity
         final_opacity = alpha * settings.splat_opacity
@@ -515,6 +520,7 @@ def sample_vertices(obj, context, axis_matrix, settings):
     return samples
 
 
+# Fix for the auto-scale calculation in sample_mesh function
 def sample_mesh(obj, context, axis_matrix, settings):
     """Sample points from mesh surface"""
     depsgraph = context.evaluated_depsgraph_get()
@@ -575,12 +581,16 @@ def sample_mesh(obj, context, axis_matrix, settings):
             if settings.use_auto_scale and kd:
                 nearest = kd.find(pos)
                 if nearest:
-                    auto_scale = nearest[2]  # Distance to nearest vertex
+                    # Ensure minimum scale to prevent log(0) errors
+                    auto_scale = max(nearest[2], 0.0001)  # Distance to nearest vertex
                 else:
                     auto_scale = settings.splat_scale
                 final_scale = auto_scale * settings.splat_scale
             else:
                 final_scale = settings.splat_scale
+            
+            # Ensure final_scale is always positive and non-zero
+            final_scale = max(final_scale, 0.0001)
             
             # Multiply alpha with global opacity
             final_opacity = alpha * settings.splat_opacity
@@ -597,7 +607,6 @@ def sample_mesh(obj, context, axis_matrix, settings):
     obj_eval.to_mesh_clear()
 
     return samples
-
 
 def get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material, settings):
     """Get color and alpha for a face"""
