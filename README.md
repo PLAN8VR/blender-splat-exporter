@@ -8,13 +8,13 @@ Dependency - Splat Transform
 
 Install Blender addon (blender_splat_export.py) the usual way.
 
-Ensure the mesh has colour attribute assigned and that vertex colours have been baked or created. (Also works with Principled BSDF base colour)
+Ensure the mesh has an active colour attribute assigned and that vertex colours have been baked or created. (Also works with Principled BSDF base colour)
 
 Select mesh to export, file\export\Gaussian Splat (.ply), or use the options in 3D view side panel. 
 
 Currently, there are two options for Points~|~Splats, use the existing vertices
 (most stable and predictable), or sample mesh (less stable and not very optimised just yet). 
-There is a global slider for opacity and size of splat, and an auto size option based on point proximity. The transparency value is calculated from the colour attribute alpha channel. 
+There is a slider for global opacity and size of splat, and an autosize splats option based on neareast point relative proximity. The transparency value is calculated from the colour attribute alpha channel. 
 
  
 
