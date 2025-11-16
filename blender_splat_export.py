@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 1, 2),
+    "version": (0, 2, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -32,6 +32,24 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
         name="Overwrite Existing File",
         description="Overwrite output file if it exists",
         default=True
+    )
+
+    keep_mjs_file: BoolProperty(
+        name="Export .mjs File",
+        description="Save the .mjs generator file in the export directory",
+        default=False
+    )
+
+    use_frame_number: BoolProperty(
+        name="Use Frame Number in Filename",
+        description="Append the current frame number to the exported filename",
+        default=False
+    )
+
+    batch_export_animation: BoolProperty(
+        name="Batch Export Animation",
+        description="Export all frames from timeline start to end",
+        default=False
     )
 
     sample_density: FloatProperty(
@@ -138,6 +156,16 @@ class GAUSSIANSPLAT_PT_MainPanel(bpy.types.Panel):
         box.prop(settings, "export_path")
         box.prop(settings, "splat_transform_path")
         box.prop(settings, "overwrite_output")
+        box.prop(settings, "keep_mjs_file")
+        
+        # Animation export options
+        box = layout.box()
+        box.label(text="Animation Export:", icon='TIME')
+        box.prop(settings, "use_frame_number")
+        box.prop(settings, "batch_export_animation")
+        if settings.batch_export_animation:
+            row = box.row()
+            row.label(text=f"Will export frames {context.scene.frame_start} to {context.scene.frame_end}")
         
         # Sampling options
         box = layout.box()
@@ -186,11 +214,6 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
             self.report({'ERROR'}, "Please specify an export path")
             return {'CANCELLED'}
         
-        # Ensure .ply extension
-        filepath = settings.export_path
-        if not filepath.lower().endswith('.ply'):
-            filepath += '.ply'
-        
         # Get selected objects
         selected_objects = [obj for obj in context.selected_objects if obj.type == 'MESH']
 
@@ -198,6 +221,29 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
             self.report({'ERROR'}, "No mesh objects selected")
             return {'CANCELLED'}
 
+        # Check if batch export is enabled
+        if settings.batch_export_animation:
+            return self.batch_export_frames(context, settings, selected_objects)
+        else:
+            return self.export_single_frame(context, settings, selected_objects, context.scene.frame_current)
+
+    def export_single_frame(self, context, settings, selected_objects, frame_number):
+        """Export a single frame"""
+        # Set the frame
+        context.scene.frame_set(frame_number)
+        
+        # Build filepath with optional frame number
+        base_path = settings.export_path
+        if not base_path.lower().endswith('.ply'):
+            base_path += '.ply'
+        
+        if settings.use_frame_number:
+            # Insert frame number before extension
+            base_name = os.path.splitext(base_path)[0]
+            filepath = f"{base_name}_{frame_number:04d}.ply"
+        else:
+            filepath = base_path
+        
         # Derive output directory and .mjs filename
         export_dir = os.path.dirname(filepath)
         if not export_dir:
@@ -220,7 +266,7 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
                     samples = sample_mesh(obj, context, axis_matrix, settings)
                 all_samples.extend(samples)
 
-            self.report({'INFO'}, f"Sampled {len(all_samples)} points from {len(selected_objects)} object(s)")
+            self.report({'INFO'}, f"Frame {frame_number}: Sampled {len(all_samples)} points from {len(selected_objects)} object(s)")
 
             # Generate the mesh generator file
             create_mesh_generator(generator_path, all_samples)
@@ -231,8 +277,6 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
                 cmd.append('-w')
             cmd.extend([generator_path, filepath])
             
-            self.report({'INFO'}, f"Running: {' '.join(cmd)}")
-
             # Run splat-transform
             result = subprocess.run(
                 cmd,
@@ -245,12 +289,48 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
                 self.report({'ERROR'}, f"splat-transform failed: {result.stderr}")
                 return {'CANCELLED'}
 
+            # Delete .mjs file if not keeping it
+            if not settings.keep_mjs_file and os.path.exists(generator_path):
+                try:
+                    os.remove(generator_path)
+                except Exception as e:
+                    self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
+
             self.report({'INFO'}, f"Successfully exported to {filepath}")
             return {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {str(e)}")
             return {'CANCELLED'}
+
+    def batch_export_frames(self, context, settings, selected_objects):
+        """Export all frames in the timeline range"""
+        start_frame = context.scene.frame_start
+        end_frame = context.scene.frame_end
+        original_frame = context.scene.frame_current
+        
+        total_frames = end_frame - start_frame + 1
+        self.report({'INFO'}, f"Starting batch export of {total_frames} frames...")
+        
+        success_count = 0
+        fail_count = 0
+        
+        for frame in range(start_frame, end_frame + 1):
+            result = self.export_single_frame(context, settings, selected_objects, frame)
+            if result == {'FINISHED'}:
+                success_count += 1
+            else:
+                fail_count += 1
+        
+        # Restore original frame
+        context.scene.frame_set(original_frame)
+        
+        if fail_count == 0:
+            self.report({'INFO'}, f"Batch export complete! Successfully exported {success_count} frames.")
+            return {'FINISHED'}
+        else:
+            self.report({'WARNING'}, f"Batch export finished with errors. Success: {success_count}, Failed: {fail_count}")
+            return {'FINISHED'}
 
 
 class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
@@ -275,6 +355,24 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         name="Overwrite Existing File",
         description="Overwrite output file if it exists",
         default=True
+    )
+
+    keep_mjs_file: BoolProperty(
+        name="Export .mjs File",
+        description="Save the .mjs generator file in the export directory",
+        default=False
+    )
+
+    use_frame_number: BoolProperty(
+        name="Use Frame Number in Filename",
+        description="Append the current frame number to the exported filename",
+        default=False
+    )
+
+    batch_export_animation: BoolProperty(
+        name="Batch Export Animation",
+        description="Export all frames from timeline start to end",
+        default=False
     )
 
     sample_density: FloatProperty(
@@ -361,6 +459,14 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         
         layout.prop(self, "splat_transform_path")
         layout.prop(self, "overwrite_output")
+        layout.prop(self, "keep_mjs_file")
+        
+        layout.separator()
+        layout.label(text="Animation Export:")
+        layout.prop(self, "use_frame_number")
+        layout.prop(self, "batch_export_animation")
+        if self.batch_export_animation:
+            layout.label(text=f"Will export frames {context.scene.frame_start} to {context.scene.frame_end}")
         
         layout.separator()
         layout.label(text="Sampling Options:")
@@ -391,8 +497,26 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
             self.report({'ERROR'}, "No mesh objects selected")
             return {'CANCELLED'}
 
-        export_dir = os.path.dirname(self.filepath)
-        base_name = os.path.splitext(os.path.basename(self.filepath))[0]
+        # Check if batch export is enabled
+        if self.batch_export_animation:
+            return self.batch_export_frames(context, selected_objects)
+        else:
+            return self.export_single_frame(context, selected_objects, context.scene.frame_current)
+
+    def export_single_frame(self, context, selected_objects, frame_number):
+        """Export a single frame"""
+        # Set the frame
+        context.scene.frame_set(frame_number)
+        
+        # Build filepath with optional frame number
+        if self.use_frame_number:
+            base_name = os.path.splitext(self.filepath)[0]
+            filepath = f"{base_name}_{frame_number:04d}.ply"
+        else:
+            filepath = self.filepath
+        
+        export_dir = os.path.dirname(filepath)
+        base_name = os.path.splitext(os.path.basename(filepath))[0]
         generator_path = os.path.join(export_dir, f"{base_name}.mjs")
 
         try:
@@ -406,16 +530,14 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                     samples = sample_mesh(obj, context, axis_matrix, self)
                 all_samples.extend(samples)
 
-            self.report({'INFO'}, f"Sampled {len(all_samples)} points from {len(selected_objects)} object(s)")
+            self.report({'INFO'}, f"Frame {frame_number}: Sampled {len(all_samples)} points from {len(selected_objects)} object(s)")
 
             create_mesh_generator(generator_path, all_samples)
 
             cmd = [self.splat_transform_path]
             if self.overwrite_output:
                 cmd.append('-w')
-            cmd.extend([generator_path, self.filepath])
-            
-            self.report({'INFO'}, f"Running: {' '.join(cmd)}")
+            cmd.extend([generator_path, filepath])
 
             result = subprocess.run(
                 cmd,
@@ -428,12 +550,48 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                 self.report({'ERROR'}, f"splat-transform failed: {result.stderr}")
                 return {'CANCELLED'}
 
-            self.report({'INFO'}, f"Successfully exported to {self.filepath}")
+            # Delete .mjs file if not keeping it
+            if not self.keep_mjs_file and os.path.exists(generator_path):
+                try:
+                    os.remove(generator_path)
+                except Exception as e:
+                    self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
+
+            self.report({'INFO'}, f"Successfully exported to {filepath}")
             return {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {str(e)}")
             return {'CANCELLED'}
+
+    def batch_export_frames(self, context, selected_objects):
+        """Export all frames in the timeline range"""
+        start_frame = context.scene.frame_start
+        end_frame = context.scene.frame_end
+        original_frame = context.scene.frame_current
+        
+        total_frames = end_frame - start_frame + 1
+        self.report({'INFO'}, f"Starting batch export of {total_frames} frames...")
+        
+        success_count = 0
+        fail_count = 0
+        
+        for frame in range(start_frame, end_frame + 1):
+            result = self.export_single_frame(context, selected_objects, frame)
+            if result == {'FINISHED'}:
+                success_count += 1
+            else:
+                fail_count += 1
+        
+        # Restore original frame
+        context.scene.frame_set(original_frame)
+        
+        if fail_count == 0:
+            self.report({'INFO'}, f"Batch export complete! Successfully exported {success_count} frames.")
+            return {'FINISHED'}
+        else:
+            self.report({'WARNING'}, f"Batch export finished with errors. Success: {success_count}, Failed: {fail_count}")
+            return {'FINISHED'}
 
 
 # Shared utility functions
@@ -451,7 +609,6 @@ def get_axis_conversion_matrix(settings):
     return conv_matrix
 
 
-# auto-scale calculation in sample_vertices function
 def sample_vertices(obj, context, axis_matrix, settings):
     """Create splats directly from mesh vertices"""
     depsgraph = context.evaluated_depsgraph_get()
@@ -520,7 +677,6 @@ def sample_vertices(obj, context, axis_matrix, settings):
     return samples
 
 
-# Fix for the auto-scale calculation in sample_mesh function
 def sample_mesh(obj, context, axis_matrix, settings):
     """Sample points from mesh surface"""
     depsgraph = context.evaluated_depsgraph_get()
