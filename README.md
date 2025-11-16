@@ -8,7 +8,7 @@ Dependency - Splat Transform
 
 Install Blender addon (blender_splat_export.py) the usual way.
 
-Ensure the mesh has colour attribute assigned and that vertex colours have been baked or created. (Also works with Principled BSDF base colour)
+Ensure the mesh has an active colour attribute assigned and that vertex colours have been baked or created. (Also works with Principled BSDF base colour)
 
 Select mesh to export, file\export\Gaussian Splat (.ply), or use the options in 3D view side panel. 
 
