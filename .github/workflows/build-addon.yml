@@ -29,7 +29,7 @@ jobs:
       - name: Prepare packaging directory
         run: |
           mkdir -p build/$ADDON_NAME
-          rsync -av --exclude='.*' --exclude='__pycache__' . build/$ADDON_NAME
+          rsync -av --exclude='.github/' --exclude='__pycache__' . build/$ADDON_NAME
 
       - name: Create ZIP package
         run: |
