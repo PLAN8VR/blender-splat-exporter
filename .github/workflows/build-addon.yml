@@ -1,0 +1,33 @@
+name: Build Blender Add-on
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build-addon:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set addon variables
+        run: |
+          ADDON_NAME="gaussian_splat_exporter"
+          echo "ADDON_NAME=$ADDON_NAME" >> $GITHUB_ENV
+
+      - name: Package Add-on
+        run: |
+          mkdir -p build/$ADDON_NAME
+          rsync -av --exclude='.*' --exclude='__pycache__' . build/$ADDON_NAME
+          cd build
+          zip -r $ADDON_NAME.zip $ADDON_NAME
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/${{ env.ADDON_NAME }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
