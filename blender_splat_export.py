@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 2, 1),
+    "version": (0, 3, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -104,6 +104,26 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
         default=True
     )
 
+    bake_mode: EnumProperty(
+        name="Bake Mode",
+        description="What to bake from the material",
+        items=(
+            ('DIFFUSE', "Diffuse", "Bake diffuse color only (Base Color without lighting)"),
+            ('EMIT', "Emission", "Bake emission only"),
+            ('COMBINED', "Combined", "Bake full render with lighting (slower, requires proper scene lighting)"),
+            ('VERTEX_ONLY', "Vertex Colors Only", "Don't bake textures, use existing vertex colors"),
+        ),
+        default='DIFFUSE',
+    )
+    
+    bake_samples: IntProperty(
+        name="Bake Samples",
+        description="Number of samples for Combined bake mode (higher = better quality but slower)",
+        default=16,
+        min=1,
+        max=1024
+    )
+
     axis_forward: EnumProperty(
         name="Forward",
         items=(
@@ -185,6 +205,10 @@ class GAUSSIANSPLAT_PT_MainPanel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Color Options:", icon='COLOR')
         box.prop(settings, "use_vertex_colors")
+        box.prop(settings, "bake_mode")
+        if settings.bake_mode == 'COMBINED':
+            box.prop(settings, "bake_samples")
+            box.label(text="Note: Requires proper scene lighting", icon='INFO')
         box.prop(settings, "use_normals")
         
         # Axis conversion
@@ -231,6 +255,12 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
         """Export a single frame"""
         # Set the frame
         context.scene.frame_set(frame_number)
+        
+        # Temporarily bake textures to vertex colors if needed
+        temp_vcol_layers = {}
+        for obj in selected_objects:
+            if obj.active_material and obj.active_material.use_nodes:
+                temp_vcol_layers[obj] = self.bake_temp_vertex_colors(obj, context, settings)
         
         # Build filepath with optional frame number
         base_path = settings.export_path
@@ -297,11 +327,19 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
                     self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
 
             self.report({'INFO'}, f"Successfully exported to {filepath}")
-            return {'FINISHED'}
+            result_status = {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {str(e)}")
-            return {'CANCELLED'}
+            result_status = {'CANCELLED'}
+        
+        finally:
+            # Clean up temporary vertex color layers
+            for obj, vcol_layer in temp_vcol_layers.items():
+                if vcol_layer and vcol_layer.name in obj.data.vertex_colors:
+                    obj.data.vertex_colors.remove(vcol_layer)
+        
+        return result_status
 
     def batch_export_frames(self, context, settings, selected_objects):
         """Export all frames in the timeline range"""
@@ -331,6 +369,212 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
         else:
             self.report({'WARNING'}, f"Batch export finished with errors. Success: {success_count}, Failed: {fail_count}")
             return {'FINISHED'}
+
+    def bake_temp_vertex_colors(self, obj, context, settings):
+        """Temporarily bake textures to vertex colors for current frame"""
+        mesh = obj.data
+        material = obj.active_material
+        
+        # Skip baking if mode is vertex colors only
+        if settings.bake_mode == 'VERTEX_ONLY':
+            return None
+        
+        # Check if material has any texture connections
+        has_textures = False
+        if material and material.use_nodes:
+            for node in material.node_tree.nodes:
+                if node.type == 'BSDF_PRINCIPLED':
+                    if node.inputs['Base Color'].is_linked or (node.inputs.get('Emission Color') and node.inputs.get('Emission Color').is_linked):
+                        has_textures = True
+                        break
+        
+        if not has_textures and settings.bake_mode != 'COMBINED':
+            return None
+        
+        # Create temporary vertex color layer
+        temp_name = "_temp_bake_"
+        if temp_name in mesh.vertex_colors:
+            vcol_layer = mesh.vertex_colors[temp_name]
+        else:
+            vcol_layer = mesh.vertex_colors.new(name=temp_name)
+        
+        # Set as active so it gets picked up during export
+        mesh.vertex_colors.active = vcol_layer
+        
+        # Use appropriate baking method based on mode
+        if settings.bake_mode == 'COMBINED':
+            # Use Blender's built-in bake system for full lighting
+            self.bake_combined_mode(obj, vcol_layer, context, settings)
+        else:
+            # Use direct texture sampling for diffuse/emission
+            self.bake_texture_mode(obj, vcol_layer, material, settings)
+        
+        return vcol_layer
+
+    def bake_texture_mode(self, obj, vcol_layer, material, settings):
+        """Bake textures directly by sampling (fast, no lighting)"""
+        mesh = obj.data
+        
+        if not mesh.uv_layers.active:
+            # No UVs, use material base color
+            color = self.get_material_color_by_mode(material, settings.bake_mode)
+            for poly in mesh.polygons:
+                for loop_idx in poly.loop_indices:
+                    vcol_layer.data[loop_idx].color = color
+            return
+        
+        uv_layer = mesh.uv_layers.active
+        
+        # Sample texture for each loop
+        for poly in mesh.polygons:
+            for loop_idx in poly.loop_indices:
+                loop = mesh.loops[loop_idx]
+                uv = uv_layer.data[loop_idx].uv
+                
+                color = self.sample_material_at_uv(material, uv, settings.bake_mode)
+                vcol_layer.data[loop_idx].color = color
+
+    def bake_combined_mode(self, obj, vcol_layer, context, settings):
+        """Bake using Blender's render bake system (includes lighting)"""
+        # Store original settings
+        original_engine = context.scene.render.engine
+        
+        try:
+            # Set up for baking
+            context.scene.render.engine = 'CYCLES'
+            context.scene.cycles.samples = settings.bake_samples
+            
+            # Ensure the object is selected
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+            
+            # Store original active color attribute
+            mesh = obj.data
+            original_active = mesh.color_attributes.active_color if hasattr(mesh, 'color_attributes') else None
+            
+            # Set our temp layer as active for baking
+            if hasattr(mesh, 'color_attributes'):
+                for attr in mesh.color_attributes:
+                    if attr.name == vcol_layer.name:
+                        mesh.color_attributes.active_color = attr
+                        break
+            
+            # Perform the bake
+            bpy.ops.object.bake(
+                type='COMBINED',
+                use_selected_to_active=False,
+                target='VERTEX_COLORS'
+            )
+            
+            # Restore original active
+            if original_active:
+                mesh.color_attributes.active_color = original_active
+                
+        except Exception as e:
+            self.report({'WARNING'}, f"Combined bake failed: {str(e)}. Using fallback.")
+            # Fallback to texture sampling
+            self.bake_texture_mode(obj, vcol_layer, obj.active_material, settings)
+        
+        finally:
+            # Restore original render engine
+            context.scene.render.engine = original_engine
+
+    def sample_material_at_uv(self, material, uv, bake_mode):
+        """Sample material color at UV coordinate based on bake mode"""
+        if not material or not material.use_nodes:
+            return (1.0, 1.0, 1.0, 1.0)
+        
+        principled = None
+        for node in material.node_tree.nodes:
+            if node.type == 'BSDF_PRINCIPLED':
+                principled = node
+                break
+        
+        if not principled:
+            return (1.0, 1.0, 1.0, 1.0)
+        
+        # Sample based on bake mode
+        if bake_mode == 'EMIT':
+            # Sample emission
+            emission_input = principled.inputs.get('Emission Color') or principled.inputs.get('Emission')
+            if emission_input and emission_input.is_linked:
+                linked_node = emission_input.links[0].from_node
+                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
+                    color, alpha = self.sample_image_at_uv(linked_node.image, uv)
+                    if color:
+                        # Multiply by emission strength
+                        strength_input = principled.inputs.get('Emission Strength')
+                        strength = strength_input.default_value if strength_input else 1.0
+                        return (color[0] * strength, color[1] * strength, color[2] * strength, alpha)
+            
+            # Fallback to default emission
+            if emission_input:
+                emission_color = emission_input.default_value
+                return tuple(emission_color)
+            return (0.0, 0.0, 0.0, 1.0)
+        
+        else:  # DIFFUSE mode
+            # Sample base color
+            base_color_input = principled.inputs['Base Color']
+            if base_color_input.is_linked:
+                linked_node = base_color_input.links[0].from_node
+                
+                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
+                    color, alpha = self.sample_image_at_uv(linked_node.image, uv)
+                    if color:
+                        return (*color, alpha)
+            
+            # Fallback to default value
+            base_color = base_color_input.default_value
+            return tuple(base_color)
+
+    def get_material_color_by_mode(self, material, bake_mode):
+        """Get material color based on bake mode (for objects without UVs)"""
+        if not material or not material.use_nodes:
+            return (1.0, 1.0, 1.0, 1.0)
+        
+        for node in material.node_tree.nodes:
+            if node.type == 'BSDF_PRINCIPLED':
+                if bake_mode == 'EMIT':
+                    emission_input = node.inputs.get('Emission Color') or node.inputs.get('Emission')
+                    if emission_input:
+                        emission = emission_input.default_value
+                        strength_input = node.inputs.get('Emission Strength')
+                        strength = strength_input.default_value if strength_input else 1.0
+                        return (emission[0] * strength, emission[1] * strength, emission[2] * strength, 1.0)
+                    return (0.0, 0.0, 0.0, 1.0)
+                else:  # DIFFUSE
+                    return tuple(node.inputs['Base Color'].default_value)
+        
+        return (1.0, 1.0, 1.0, 1.0)
+
+    def sample_image_at_uv(self, image, uv_coord):
+        """Sample an image at UV coordinates"""
+        if not image or not image.pixels:
+            return None, None
+        
+        width = image.size[0]
+        height = image.size[1]
+        
+        # Wrap UV coordinates
+        u = uv_coord[0] % 1.0
+        v = uv_coord[1] % 1.0
+        
+        # Convert to pixel coordinates
+        x = int(u * width) % width
+        y = int(v * height) % height
+        
+        pixel_index = (y * width + x) * 4
+        
+        try:
+            r = image.pixels[pixel_index]
+            g = image.pixels[pixel_index + 1]
+            b = image.pixels[pixel_index + 2]
+            a = image.pixels[pixel_index + 3]
+            return [r, g, b], a
+        except IndexError:
+            return None, None
 
 
 class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
@@ -427,6 +671,26 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         default=True
     )
 
+    bake_mode: EnumProperty(
+        name="Bake Mode",
+        description="What to bake from the material",
+        items=(
+            ('DIFFUSE', "Diffuse", "Bake diffuse color only (Base Color without lighting)"),
+            ('EMIT', "Emission", "Bake emission only"),
+            ('COMBINED', "Combined", "Bake full render with lighting (slower)"),
+            ('VERTEX_ONLY', "Vertex Colors Only", "Don't bake textures, use existing vertex colors"),
+        ),
+        default='DIFFUSE',
+    )
+    
+    bake_samples: IntProperty(
+        name="Bake Samples",
+        description="Number of samples for Combined bake mode",
+        default=16,
+        min=1,
+        max=1024
+    )
+
     axis_forward: EnumProperty(
         name="Forward",
         items=(
@@ -483,6 +747,10 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         layout.separator()
         layout.label(text="Color Options:")
         layout.prop(self, "use_vertex_colors")
+        layout.prop(self, "bake_mode")
+        if self.bake_mode == 'COMBINED':
+            layout.prop(self, "bake_samples")
+            layout.label(text="Note: Requires proper scene lighting", icon='INFO')
         layout.prop(self, "use_normals")
         
         layout.separator()
@@ -507,6 +775,12 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         """Export a single frame"""
         # Set the frame
         context.scene.frame_set(frame_number)
+        
+        # Temporarily bake textures to vertex colors if needed
+        temp_vcol_layers = {}
+        for obj in selected_objects:
+            if obj.active_material and obj.active_material.use_nodes:
+                temp_vcol_layers[obj] = self.bake_temp_vertex_colors(obj, context)
         
         # Build filepath with optional frame number
         if self.use_frame_number:
@@ -558,11 +832,19 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
                     self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
 
             self.report({'INFO'}, f"Successfully exported to {filepath}")
-            return {'FINISHED'}
+            result_status = {'FINISHED'}
 
         except Exception as e:
             self.report({'ERROR'}, f"Export failed: {str(e)}")
-            return {'CANCELLED'}
+            result_status = {'CANCELLED'}
+        
+        finally:
+            # Clean up temporary vertex color layers
+            for obj, vcol_layer in temp_vcol_layers.items():
+                if vcol_layer and vcol_layer.name in obj.data.vertex_colors:
+                    obj.data.vertex_colors.remove(vcol_layer)
+        
+        return result_status
 
     def batch_export_frames(self, context, selected_objects):
         """Export all frames in the timeline range"""
@@ -592,6 +874,212 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         else:
             self.report({'WARNING'}, f"Batch export finished with errors. Success: {success_count}, Failed: {fail_count}")
             return {'FINISHED'}
+
+    def bake_temp_vertex_colors(self, obj, context):
+        """Temporarily bake textures to vertex colors for current frame"""
+        mesh = obj.data
+        material = obj.active_material
+        
+        # Skip baking if mode is vertex colors only
+        if self.bake_mode == 'VERTEX_ONLY':
+            return None
+        
+        # Check if material has any texture connections
+        has_textures = False
+        if material and material.use_nodes:
+            for node in material.node_tree.nodes:
+                if node.type == 'BSDF_PRINCIPLED':
+                    if node.inputs['Base Color'].is_linked or (node.inputs.get('Emission Color') and node.inputs.get('Emission Color').is_linked):
+                        has_textures = True
+                        break
+        
+        if not has_textures and self.bake_mode != 'COMBINED':
+            return None
+        
+        # Create temporary vertex color layer
+        temp_name = "_temp_bake_"
+        if temp_name in mesh.vertex_colors:
+            vcol_layer = mesh.vertex_colors[temp_name]
+        else:
+            vcol_layer = mesh.vertex_colors.new(name=temp_name)
+        
+        # Set as active so it gets picked up during export
+        mesh.vertex_colors.active = vcol_layer
+        
+        # Use appropriate baking method based on mode
+        if self.bake_mode == 'COMBINED':
+            # Use Blender's built-in bake system for full lighting
+            self.bake_combined_mode(obj, vcol_layer, context)
+        else:
+            # Use direct texture sampling for diffuse/emission
+            self.bake_texture_mode(obj, vcol_layer, material)
+        
+        return vcol_layer
+
+    def bake_texture_mode(self, obj, vcol_layer, material):
+        """Bake textures directly by sampling (fast, no lighting)"""
+        mesh = obj.data
+        
+        if not mesh.uv_layers.active:
+            # No UVs, use material base color
+            color = self.get_material_color_by_mode(material, self.bake_mode)
+            for poly in mesh.polygons:
+                for loop_idx in poly.loop_indices:
+                    vcol_layer.data[loop_idx].color = color
+            return
+        
+        uv_layer = mesh.uv_layers.active
+        
+        # Sample texture for each loop
+        for poly in mesh.polygons:
+            for loop_idx in poly.loop_indices:
+                loop = mesh.loops[loop_idx]
+                uv = uv_layer.data[loop_idx].uv
+                
+                color = self.sample_material_at_uv(material, uv, self.bake_mode)
+                vcol_layer.data[loop_idx].color = color
+
+    def bake_combined_mode(self, obj, vcol_layer, context):
+        """Bake using Blender's render bake system (includes lighting)"""
+        # Store original settings
+        original_engine = context.scene.render.engine
+        
+        try:
+            # Set up for baking
+            context.scene.render.engine = 'CYCLES'
+            context.scene.cycles.samples = self.bake_samples
+            
+            # Ensure the object is selected
+            bpy.ops.object.select_all(action='DESELECT')
+            obj.select_set(True)
+            context.view_layer.objects.active = obj
+            
+            # Store original active color attribute
+            mesh = obj.data
+            original_active = mesh.color_attributes.active_color if hasattr(mesh, 'color_attributes') else None
+            
+            # Set our temp layer as active for baking
+            if hasattr(mesh, 'color_attributes'):
+                for attr in mesh.color_attributes:
+                    if attr.name == vcol_layer.name:
+                        mesh.color_attributes.active_color = attr
+                        break
+            
+            # Perform the bake
+            bpy.ops.object.bake(
+                type='COMBINED',
+                use_selected_to_active=False,
+                target='VERTEX_COLORS'
+            )
+            
+            # Restore original active
+            if original_active:
+                mesh.color_attributes.active_color = original_active
+                
+        except Exception as e:
+            self.report({'WARNING'}, f"Combined bake failed: {str(e)}. Using fallback.")
+            # Fallback to texture sampling
+            self.bake_texture_mode(obj, vcol_layer, obj.active_material)
+        
+        finally:
+            # Restore original render engine
+            context.scene.render.engine = original_engine
+
+    def sample_material_at_uv(self, material, uv, bake_mode):
+        """Sample material color at UV coordinate based on bake mode"""
+        if not material or not material.use_nodes:
+            return (1.0, 1.0, 1.0, 1.0)
+        
+        principled = None
+        for node in material.node_tree.nodes:
+            if node.type == 'BSDF_PRINCIPLED':
+                principled = node
+                break
+        
+        if not principled:
+            return (1.0, 1.0, 1.0, 1.0)
+        
+        # Sample based on bake mode
+        if bake_mode == 'EMIT':
+            # Sample emission
+            emission_input = principled.inputs.get('Emission Color') or principled.inputs.get('Emission')
+            if emission_input and emission_input.is_linked:
+                linked_node = emission_input.links[0].from_node
+                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
+                    color, alpha = self.sample_image_at_uv(linked_node.image, uv)
+                    if color:
+                        # Multiply by emission strength
+                        strength_input = principled.inputs.get('Emission Strength')
+                        strength = strength_input.default_value if strength_input else 1.0
+                        return (color[0] * strength, color[1] * strength, color[2] * strength, alpha)
+            
+            # Fallback to default emission
+            if emission_input:
+                emission_color = emission_input.default_value
+                return tuple(emission_color)
+            return (0.0, 0.0, 0.0, 1.0)
+        
+        else:  # DIFFUSE mode
+            # Sample base color
+            base_color_input = principled.inputs['Base Color']
+            if base_color_input.is_linked:
+                linked_node = base_color_input.links[0].from_node
+                
+                if linked_node.type == 'TEX_IMAGE' and linked_node.image:
+                    color, alpha = self.sample_image_at_uv(linked_node.image, uv)
+                    if color:
+                        return (*color, alpha)
+            
+            # Fallback to default value
+            base_color = base_color_input.default_value
+            return tuple(base_color)
+
+    def get_material_color_by_mode(self, material, bake_mode):
+        """Get material color based on bake mode (for objects without UVs)"""
+        if not material or not material.use_nodes:
+            return (1.0, 1.0, 1.0, 1.0)
+        
+        for node in material.node_tree.nodes:
+            if node.type == 'BSDF_PRINCIPLED':
+                if bake_mode == 'EMIT':
+                    emission_input = node.inputs.get('Emission Color') or node.inputs.get('Emission')
+                    if emission_input:
+                        emission = emission_input.default_value
+                        strength_input = node.inputs.get('Emission Strength')
+                        strength = strength_input.default_value if strength_input else 1.0
+                        return (emission[0] * strength, emission[1] * strength, emission[2] * strength, 1.0)
+                    return (0.0, 0.0, 0.0, 1.0)
+                else:  # DIFFUSE
+                    return tuple(node.inputs['Base Color'].default_value)
+        
+        return (1.0, 1.0, 1.0, 1.0)
+
+    def sample_image_at_uv(self, image, uv_coord):
+        """Sample an image at UV coordinates"""
+        if not image or not image.pixels:
+            return None, None
+        
+        width = image.size[0]
+        height = image.size[1]
+        
+        # Wrap UV coordinates
+        u = uv_coord[0] % 1.0
+        v = uv_coord[1] % 1.0
+        
+        # Convert to pixel coordinates
+        x = int(u * width) % width
+        y = int(v * height) % height
+        
+        pixel_index = (y * width + x) * 4
+        
+        try:
+            r = image.pixels[pixel_index]
+            g = image.pixels[pixel_index + 1]
+            b = image.pixels[pixel_index + 2]
+            a = image.pixels[pixel_index + 3]
+            return [r, g, b], a
+        except IndexError:
+            return None, None
 
 
 # Shared utility functions
@@ -763,6 +1251,7 @@ def sample_mesh(obj, context, axis_matrix, settings):
     obj_eval.to_mesh_clear()
 
     return samples
+
 
 def get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material, settings):
     """Get color and alpha for a face"""
