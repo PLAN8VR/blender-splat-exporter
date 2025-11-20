@@ -2,6 +2,8 @@
 Blender addon (windows) that exports synthetic Gaussian Splat .ply from mesh geometry using Playcanvas' Splat-Transform. Currently works with vertex colours.
 Addon also exports the .mjs file for future use/editing with Splat-Transform. 
 
+
+
 Dependency - Splat Transform
 
  https://github.com/playcanvas/splat-transform - install as per instructions 
