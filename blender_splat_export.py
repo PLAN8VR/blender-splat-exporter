@@ -1,7 +1,7 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 2, 2),
+    "version": (0, 2, 3),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply/.sog)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
@@ -90,8 +90,16 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
     
     use_auto_scale: BoolProperty(
         name="Auto Scale from Vertex Proximity",
-        description="Automatically scale splats based on distance to nearest vertex",
+        description="Automatically scale splats based on distance to nearest vertices",
         default=True
+    )
+
+    auto_scale_neighbors: IntProperty(
+        name="Auto Scale Neighbor Count",
+        description="Number of nearest neighbors to average for auto-scaling (higher = smoother)",
+        default=5,
+        min=1,
+        max=20
     )
 
     splat_opacity: FloatProperty(
@@ -189,6 +197,8 @@ class GAUSSIANSPLAT_PT_MainPanel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Splat Properties:", icon='PARTICLE_DATA')
         box.prop(settings, "use_auto_scale")
+        if settings.use_auto_scale:
+            box.prop(settings, "auto_scale_neighbors")
         box.prop(settings, "splat_scale")
         box.prop(settings, "splat_opacity")
         
@@ -430,8 +440,16 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
     
     use_auto_scale: BoolProperty(
         name="Auto Scale from Vertex Proximity",
-        description="Automatically scale splats based on distance to nearest vertex",
+        description="Automatically scale splats based on distance to nearest vertices",
         default=True
+    )
+
+    auto_scale_neighbors: IntProperty(
+        name="Auto Scale Neighbor Count",
+        description="Number of nearest neighbors to average for auto-scaling (higher = smoother)",
+        default=5,
+        min=1,
+        max=20
     )
 
     splat_opacity: FloatProperty(
@@ -505,6 +523,8 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         layout.separator()
         layout.label(text="Splat Properties:")
         layout.prop(self, "use_auto_scale")
+        if self.use_auto_scale:
+            layout.prop(self, "auto_scale_neighbors")
         layout.prop(self, "splat_scale")
         layout.prop(self, "splat_opacity")
         
@@ -684,16 +704,19 @@ def sample_vertices(obj, context, axis_matrix, settings):
         color, alpha = get_vertex_color(vert.index, mesh, has_vertex_colors, color_attribute, material, settings)
         normal = matrix_world.to_3x3() @ vert.normal if settings.use_normals else Vector((0, 0, 1))
         
-        # Calculate scale based on nearest neighbor distance
+        # Calculate scale based on average nearest neighbor distance
         if settings.use_auto_scale and kd:
-            # Find the 2 nearest vertices (first will be the vertex itself)
-            nearest = kd.find_n(vert.co, 2)
+            # Find N+1 nearest vertices (first will be the vertex itself at distance 0)
+            num_neighbors = settings.auto_scale_neighbors + 1
+            nearest = kd.find_n(vert.co, num_neighbors)
             if len(nearest) > 1:
-                nearest_dist = nearest[1][2]  # Distance to second nearest (first is self at distance 0)
-                # Ensure minimum scale to prevent log(0) errors
-                auto_scale = max(nearest_dist, 0.0001)
+                # Skip the first result (self) and average the distances
+                distances = [n[2] for n in nearest[1:]]  # n[2] is the distance
+                avg_dist = sum(distances) / len(distances)
+                # Use average distance as the scale (will give roughly correct coverage)
+                auto_scale = max(avg_dist, 0.0001)
             else:
-                auto_scale = settings.splat_scale
+                auto_scale = 0.01  # Fallback for isolated vertices
             final_scale = auto_scale * settings.splat_scale
         else:
             final_scale = settings.splat_scale
@@ -772,14 +795,18 @@ def sample_mesh(obj, context, axis_matrix, settings):
             color, alpha = get_face_color(face, obj, mesh, has_vertex_colors, color_attribute, material, settings)
             normal = matrix_world.to_3x3() @ face.normal if settings.use_normals else Vector((0, 0, 1))
             
-            # Calculate scale based on nearest vertex distance
+            # Calculate scale based on average nearest vertex distance
             if settings.use_auto_scale and kd:
-                nearest = kd.find(pos)
-                if nearest:
-                    # Ensure minimum scale to prevent log(0) errors
-                    auto_scale = max(nearest[2], 0.0001)  # Distance to nearest vertex
+                # Find N nearest vertices
+                num_neighbors = settings.auto_scale_neighbors
+                nearest_list = kd.find_n(pos, num_neighbors)
+                if nearest_list:
+                    # Average the distances to all found neighbors
+                    distances = [n[2] for n in nearest_list]  # n[2] is the distance
+                    avg_dist = sum(distances) / len(distances)
+                    auto_scale = max(avg_dist, 0.0001)
                 else:
-                    auto_scale = settings.splat_scale
+                    auto_scale = 0.01  # Fallback
                 final_scale = auto_scale * settings.splat_scale
             else:
                 final_scale = settings.splat_scale
