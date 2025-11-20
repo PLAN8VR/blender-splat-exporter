@@ -1,9 +1,9 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 2, 1),
+    "version": (0, 2, 2),
     "blender": (3, 0, 0),
-    "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply)",
+    "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply/.sog)",
     "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
     "category": "Import-Export",
 }
@@ -21,6 +21,16 @@ import math
 
 class GaussianSplatSettings(bpy.types.PropertyGroup):
     """Settings for Gaussian Splat export"""
+    
+    export_format: EnumProperty(
+        name="Export Format",
+        description="Choose the output file format",
+        items=(
+            ('PLY', ".ply", "Export as PLY format"),
+            ('SOG', ".sog", "Export as SOG format"),
+        ),
+        default='PLY',
+    )
     
     splat_transform_path: StringProperty(
         name="splat-transform Command",
@@ -132,7 +142,7 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
 
     export_path: StringProperty(
         name="Export Path",
-        description="Path for the exported .ply file",
+        description="Path for the exported file",
         default="",
         subtype='FILE_PATH'
     )
@@ -154,6 +164,7 @@ class GAUSSIANSPLAT_PT_MainPanel(bpy.types.Panel):
         box = layout.box()
         box.label(text="Export Settings:", icon='EXPORT')
         box.prop(settings, "export_path")
+        box.prop(settings, "export_format")
         box.prop(settings, "splat_transform_path")
         box.prop(settings, "overwrite_output")
         box.prop(settings, "keep_mjs_file")
@@ -232,17 +243,22 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
         # Set the frame
         context.scene.frame_set(frame_number)
         
+        # Get file extension based on format
+        file_ext = '.ply' if settings.export_format == 'PLY' else '.sog'
+        
         # Build filepath with optional frame number
         base_path = settings.export_path
-        if not base_path.lower().endswith('.ply'):
-            base_path += '.ply'
+        # Remove existing extension if present
+        for ext in ['.ply', '.sog']:
+            if base_path.lower().endswith(ext):
+                base_path = base_path[:-len(ext)]
+                break
         
         if settings.use_frame_number:
             # Insert frame number before extension
-            base_name = os.path.splitext(base_path)[0]
-            filepath = f"{base_name}_{frame_number:04d}.ply"
+            filepath = f"{base_path}_{frame_number:04d}{file_ext}"
         else:
-            filepath = base_path
+            filepath = base_path + file_ext
         
         # Derive output directory and .mjs filename
         export_dir = os.path.dirname(filepath)
@@ -271,7 +287,8 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
             # Generate the mesh generator file
             create_mesh_generator(generator_path, all_samples)
 
-            # Build splat-transform command as a list
+            # Build splat-transform command
+            # Format is automatically detected by file extension
             cmd = [settings.splat_transform_path]
             if settings.overwrite_output:
                 cmd.append('-w')
@@ -341,8 +358,18 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
     filename_ext = ".ply"
 
     filter_glob: StringProperty(
-        default="*.ply",
+        default="*.ply;*.sog",
         options={'HIDDEN'},
+    )
+
+    export_format: EnumProperty(
+        name="Export Format",
+        description="Choose the output file format",
+        items=(
+            ('PLY', ".ply", "Export as PLY format"),
+            ('SOG', ".sog", "Export as SOG format"),
+        ),
+        default='PLY',
     )
 
     splat_transform_path: StringProperty(
@@ -458,6 +485,7 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         layout = self.layout
         
         layout.prop(self, "splat_transform_path")
+        layout.prop(self, "export_format")
         layout.prop(self, "overwrite_output")
         layout.prop(self, "keep_mjs_file")
         
@@ -508,12 +536,21 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         # Set the frame
         context.scene.frame_set(frame_number)
         
-        # Build filepath with optional frame number
+        # Get file extension based on format
+        file_ext = '.ply' if self.export_format == 'PLY' else '.sog'
+        
+        # Build filepath with optional frame number and correct extension
+        base_path = self.filepath
+        # Remove existing extension if present
+        for ext in ['.ply', '.sog']:
+            if base_path.lower().endswith(ext):
+                base_path = base_path[:-len(ext)]
+                break
+        
         if self.use_frame_number:
-            base_name = os.path.splitext(self.filepath)[0]
-            filepath = f"{base_name}_{frame_number:04d}.ply"
+            filepath = f"{base_path}_{frame_number:04d}{file_ext}"
         else:
-            filepath = self.filepath
+            filepath = base_path + file_ext
         
         export_dir = os.path.dirname(filepath)
         base_name = os.path.splitext(os.path.basename(filepath))[0]
@@ -534,6 +571,8 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
 
             create_mesh_generator(generator_path, all_samples)
 
+            # Build splat-transform command
+            # Format is automatically detected by file extension
             cmd = [self.splat_transform_path]
             if self.overwrite_output:
                 cmd.append('-w')
@@ -959,7 +998,7 @@ export {{ Generator }};
 
 
 def menu_func_export(self, context):
-    self.layout.operator(GaussianSplatExporter.bl_idname, text="Gaussian Splat (.ply)")
+    self.layout.operator(GaussianSplatExporter.bl_idname, text="Gaussian Splat (.ply/.sog)")
 
 
 # Registration
