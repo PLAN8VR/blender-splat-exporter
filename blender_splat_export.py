@@ -1,10 +1,10 @@
 bl_info = {
     "name": "Gaussian Splat Exporter",
     "author": "PLAN8",
-    "version": (0, 2, 3),
+    "version": (0, 3, 0),
     "blender": (3, 0, 0),
     "location": "View3D > Sidebar > Gaussian Splat | File > Export > Gaussian Splat (.ply/.sog)",
-    "description": "Export mesh geometry to Gaussian Splat format using Playcanvas' splat-transform",
+    "description": "Export mesh geometry to Gaussian Splat format with direct PLY export or via splat-transform",
     "category": "Import-Export",
 }
 
@@ -32,6 +32,12 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
         default='PLY',
     )
     
+    use_splat_transform: BoolProperty(
+        name="Use splat-transform",
+        description="Use external splat-transform tool (requires installation). If disabled, writes PLY directly",
+        default=False
+    )
+
     splat_transform_path: StringProperty(
         name="splat-transform Command",
         description="Command to run splat-transform (e.g., 'splat-transform' if globally installed, or full path)",
@@ -46,7 +52,7 @@ class GaussianSplatSettings(bpy.types.PropertyGroup):
 
     keep_mjs_file: BoolProperty(
         name="Export .mjs File",
-        description="Save the .mjs generator file in the export directory",
+        description="Save the .mjs generator file in the export directory (only used with splat-transform)",
         default=False
     )
 
@@ -173,9 +179,11 @@ class GAUSSIANSPLAT_PT_MainPanel(bpy.types.Panel):
         box.label(text="Export Settings:", icon='EXPORT')
         box.prop(settings, "export_path")
         box.prop(settings, "export_format")
-        box.prop(settings, "splat_transform_path")
+        box.prop(settings, "use_splat_transform")
+        if settings.use_splat_transform:
+            box.prop(settings, "splat_transform_path")
+            box.prop(settings, "keep_mjs_file")
         box.prop(settings, "overwrite_output")
-        box.prop(settings, "keep_mjs_file")
         
         # Animation export options
         box = layout.box()
@@ -270,14 +278,11 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
         else:
             filepath = base_path + file_ext
         
-        # Derive output directory and .mjs filename
+        # Derive output directory
         export_dir = os.path.dirname(filepath)
         if not export_dir:
             export_dir = bpy.path.abspath("//")
             filepath = os.path.join(export_dir, os.path.basename(filepath))
-        
-        base_name = os.path.splitext(os.path.basename(filepath))[0]
-        generator_path = os.path.join(export_dir, f"{base_name}.mjs")
 
         try:
             # Get axis conversion matrix
@@ -294,40 +299,53 @@ class GAUSSIANSPLAT_OT_DirectExport(bpy.types.Operator):
 
             self.report({'INFO'}, f"Frame {frame_number}: Sampled {len(all_samples)} points from {len(selected_objects)} object(s)")
 
-            # Generate the mesh generator file
-            create_mesh_generator(generator_path, all_samples)
+            # Choose export method
+            if settings.use_splat_transform:
+                # Use splat-transform method
+                base_name = os.path.splitext(os.path.basename(filepath))[0]
+                generator_path = os.path.join(export_dir, f"{base_name}.mjs")
+                
+                create_mesh_generator(generator_path, all_samples)
 
-            # Build splat-transform command
-            # Format is automatically detected by file extension
-            cmd = [settings.splat_transform_path]
-            if settings.overwrite_output:
-                cmd.append('-w')
-            cmd.extend([generator_path, filepath])
-            
-            # Run splat-transform
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                shell=True
-            )
+                # Build splat-transform command
+                cmd = [settings.splat_transform_path]
+                if settings.overwrite_output:
+                    cmd.append('-w')
+                cmd.extend([generator_path, filepath])
+                
+                # Run splat-transform
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    shell=True
+                )
 
-            if result.returncode != 0:
-                self.report({'ERROR'}, f"splat-transform failed: {result.stderr}")
-                return {'CANCELLED'}
+                if result.returncode != 0:
+                    self.report({'ERROR'}, f"splat-transform failed: {result.stderr}")
+                    return {'CANCELLED'}
 
-            # Delete .mjs file if not keeping it
-            if not settings.keep_mjs_file and os.path.exists(generator_path):
-                try:
-                    os.remove(generator_path)
-                except Exception as e:
-                    self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
+                # Delete .mjs file if not keeping it
+                if not settings.keep_mjs_file and os.path.exists(generator_path):
+                    try:
+                        os.remove(generator_path)
+                    except Exception as e:
+                        self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
+            else:
+                # Write PLY directly
+                if settings.export_format == 'PLY':
+                    write_ply_direct(filepath, all_samples, settings.overwrite_output)
+                else:
+                    self.report({'ERROR'}, "Direct export only supports PLY format. Use splat-transform for SOG format.")
+                    return {'CANCELLED'}
 
             self.report({'INFO'}, f"Successfully exported to {filepath}")
             return {'FINISHED'}
 
         except Exception as e:
+            import traceback
             self.report({'ERROR'}, f"Export failed: {str(e)}")
+            print(traceback.format_exc())  # Print full traceback to console
             return {'CANCELLED'}
 
     def batch_export_frames(self, context, settings, selected_objects):
@@ -382,6 +400,12 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         default='PLY',
     )
 
+    use_splat_transform: BoolProperty(
+        name="Use splat-transform",
+        description="Use external splat-transform tool (requires installation). If disabled, writes PLY directly",
+        default=False
+    )
+
     splat_transform_path: StringProperty(
         name="splat-transform Command",
         description="Command to run splat-transform (e.g., 'splat-transform' if globally installed, or full path)",
@@ -396,7 +420,7 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
 
     keep_mjs_file: BoolProperty(
         name="Export .mjs File",
-        description="Save the .mjs generator file in the export directory",
+        description="Save the .mjs generator file in the export directory (only used with splat-transform)",
         default=False
     )
 
@@ -502,10 +526,12 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
         """Draw the export options in the file browser"""
         layout = self.layout
         
-        layout.prop(self, "splat_transform_path")
+        layout.prop(self, "use_splat_transform")
+        if self.use_splat_transform:
+            layout.prop(self, "splat_transform_path")
+            layout.prop(self, "keep_mjs_file")
         layout.prop(self, "export_format")
         layout.prop(self, "overwrite_output")
-        layout.prop(self, "keep_mjs_file")
         
         layout.separator()
         layout.label(text="Animation Export:")
@@ -573,8 +599,6 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
             filepath = base_path + file_ext
         
         export_dir = os.path.dirname(filepath)
-        base_name = os.path.splitext(os.path.basename(filepath))[0]
-        generator_path = os.path.join(export_dir, f"{base_name}.mjs")
 
         try:
             axis_matrix = get_axis_conversion_matrix(self)
@@ -589,38 +613,52 @@ class GaussianSplatExporter(bpy.types.Operator, ExportHelper):
 
             self.report({'INFO'}, f"Frame {frame_number}: Sampled {len(all_samples)} points from {len(selected_objects)} object(s)")
 
-            create_mesh_generator(generator_path, all_samples)
+            # Choose export method
+            if self.use_splat_transform:
+                # Use splat-transform method
+                base_name = os.path.splitext(os.path.basename(filepath))[0]
+                generator_path = os.path.join(export_dir, f"{base_name}.mjs")
+                
+                create_mesh_generator(generator_path, all_samples)
 
-            # Build splat-transform command
-            # Format is automatically detected by file extension
-            cmd = [self.splat_transform_path]
-            if self.overwrite_output:
-                cmd.append('-w')
-            cmd.extend([generator_path, filepath])
+                # Build splat-transform command
+                cmd = [self.splat_transform_path]
+                if self.overwrite_output:
+                    cmd.append('-w')
+                cmd.extend([generator_path, filepath])
 
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                shell=True
-            )
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    shell=True
+                )
 
-            if result.returncode != 0:
-                self.report({'ERROR'}, f"splat-transform failed: {result.stderr}")
-                return {'CANCELLED'}
+                if result.returncode != 0:
+                    self.report({'ERROR'}, f"splat-transform failed: {result.stderr}")
+                    return {'CANCELLED'}
 
-            # Delete .mjs file if not keeping it
-            if not self.keep_mjs_file and os.path.exists(generator_path):
-                try:
-                    os.remove(generator_path)
-                except Exception as e:
-                    self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
+                # Delete .mjs file if not keeping it
+                if not self.keep_mjs_file and os.path.exists(generator_path):
+                    try:
+                        os.remove(generator_path)
+                    except Exception as e:
+                        self.report({'WARNING'}, f"Could not delete .mjs file: {str(e)}")
+            else:
+                # Write PLY directly
+                if self.export_format == 'PLY':
+                    write_ply_direct(filepath, all_samples, self.overwrite_output)
+                else:
+                    self.report({'ERROR'}, "Direct export only supports PLY format. Use splat-transform for SOG format.")
+                    return {'CANCELLED'}
 
             self.report({'INFO'}, f"Successfully exported to {filepath}")
             return {'FINISHED'}
 
         except Exception as e:
+            import traceback
             self.report({'ERROR'}, f"Export failed: {str(e)}")
+            print(traceback.format_exc())  # Print full traceback to console
             return {'CANCELLED'}
 
     def batch_export_frames(self, context, selected_objects):
@@ -1022,6 +1060,122 @@ export {{ Generator }};
 
     with open(path, 'w') as f:
         f.write(code)
+
+
+def write_ply_direct(filepath, samples, overwrite):
+    """Write Gaussian Splat PLY file directly without splat-transform"""
+    import struct
+    
+    if not overwrite and os.path.exists(filepath):
+        raise FileExistsError(f"File {filepath} already exists and overwrite is disabled")
+    
+    def normal_to_quat(normal):
+        """Convert normal vector to quaternion rotation"""
+        up = Vector((0, 0, 1))
+        if abs(normal.dot(up)) > 0.999:
+            return [0.0, 0.0, 0.0, 1.0]
+        axis = up.cross(normal).normalized()
+        angle = math.acos(max(-1.0, min(1.0, up.dot(normal))))
+        half_angle = angle / 2
+        s = math.sin(half_angle)
+        return [axis.x * s, axis.y * s, axis.z * s, math.cos(half_angle)]
+    
+    # Spherical harmonics constant
+    SH_C0 = 0.28209479177387814
+    
+    # Calculate properties for each splat
+    splat_data = []
+    for sample in samples:
+        pos = sample['position']
+        color = sample['color']
+        normal = sample['normal']
+        scale = sample['scale']
+        opacity = sample['opacity']
+        
+        # Convert to Gaussian splat format
+        # Position (x, y, z)
+        x, y, z = pos.x, pos.y, pos.z
+        
+        # Normal to quaternion (for rotation)
+        quat = normal_to_quat(normal)
+        rot_0, rot_1, rot_2, rot_3 = quat
+        
+        # Scale (logarithmic, same for all 3 axes)
+        log_scale = math.log(max(scale, 1e-8))
+        scale_0 = scale_1 = scale_2 = log_scale
+        
+        # Color to spherical harmonics (DC component only)
+        # Formula: (color - 0.5) / SH_C0
+        f_dc_0 = (color[0] - 0.5) / SH_C0
+        f_dc_1 = (color[1] - 0.5) / SH_C0
+        f_dc_2 = (color[2] - 0.5) / SH_C0
+        
+        # Opacity (logit transform)
+        if opacity <= 0:
+            opacity_logit = -20.0
+        elif opacity >= 1:
+            opacity_logit = 20.0
+        else:
+            opacity_logit = -math.log(1.0 / opacity - 1.0)
+        
+        # Additional spherical harmonics (45 zeros for higher order SH)
+        sh_rest = [0.0] * 45
+        
+        splat_data.append({
+            'x': x, 'y': y, 'z': z,
+            'nx': normal.x, 'ny': normal.y, 'nz': normal.z,
+            'f_dc_0': f_dc_0, 'f_dc_1': f_dc_1, 'f_dc_2': f_dc_2,
+            'sh_rest': sh_rest,
+            'opacity': opacity_logit,
+            'scale_0': scale_0, 'scale_1': scale_1, 'scale_2': scale_2,
+            'rot_0': rot_0, 'rot_1': rot_1, 'rot_2': rot_2, 'rot_3': rot_3
+        })
+    
+    # Write PLY file
+    with open(filepath, 'wb') as f:
+        # Write ASCII header
+        header = f"""ply
+format binary_little_endian 1.0
+element vertex {len(splat_data)}
+property float x
+property float y
+property float z
+property float nx
+property float ny
+property float nz
+property float f_dc_0
+property float f_dc_1
+property float f_dc_2
+"""
+        # Add f_rest_0 through f_rest_44 (45 additional SH coefficients)
+        for i in range(45):
+            header += f"property float f_rest_{i}\n"
+        
+        header += """property float opacity
+property float scale_0
+property float scale_1
+property float scale_2
+property float rot_0
+property float rot_1
+property float rot_2
+property float rot_3
+end_header
+"""
+        f.write(header.encode('ascii'))
+        
+        # Write binary vertex data
+        for splat in splat_data:
+            # Pack all properties as little-endian floats
+            data = struct.pack('<fff', splat['x'], splat['y'], splat['z'])  # position
+            data += struct.pack('<fff', splat['nx'], splat['ny'], splat['nz'])  # normal
+            data += struct.pack('<fff', splat['f_dc_0'], splat['f_dc_1'], splat['f_dc_2'])  # DC SH
+            # Add 45 higher-order SH coefficients (all zeros)
+            for sh_val in splat['sh_rest']:
+                data += struct.pack('<f', sh_val)
+            data += struct.pack('<f', splat['opacity'])  # opacity
+            data += struct.pack('<fff', splat['scale_0'], splat['scale_1'], splat['scale_2'])  # scale
+            data += struct.pack('<ffff', splat['rot_0'], splat['rot_1'], splat['rot_2'], splat['rot_3'])  # rotation
+            f.write(data)
 
 
 def menu_func_export(self, context):
